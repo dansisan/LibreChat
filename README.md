@@ -1,3 +1,5 @@
+To update after syncing fork: `docker compose pull`
+
 <p align="center">
   <a href="https://librechat.ai">
     <img src="client/public/assets/logo.svg" height="256">
