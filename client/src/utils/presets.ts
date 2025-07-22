@@ -12,27 +12,13 @@ export const getPresetTitle = (preset: TPreset, mention?: boolean) => {
     promptPrefix,
     chatGptLabel,
     modelLabel,
-    jailbreak,
-    toneStyle,
   } = preset;
+  const modelInfo = model ?? '';
   let title = '';
-  let modelInfo = model ?? '';
   let label = '';
 
-  const usesChatGPTLabel: TEndpoints = [
-    EModelEndpoint.azureOpenAI,
-    EModelEndpoint.openAI,
-    EModelEndpoint.custom,
-  ];
-  const usesModelLabel: TEndpoints = [EModelEndpoint.google, EModelEndpoint.anthropic];
-
-  if (endpoint != null && endpoint && usesChatGPTLabel.includes(endpoint)) {
-    label = chatGptLabel ?? '';
-  } else if (endpoint != null && endpoint && usesModelLabel.includes(endpoint)) {
-    label = modelLabel ?? '';
-  } else if (endpoint === EModelEndpoint.bingAI) {
-    modelInfo = jailbreak === true ? 'Sydney' : modelInfo;
-    label = toneStyle != null && toneStyle ? `: ${toneStyle}` : '';
+  if (modelLabel) {
+    label = modelLabel;
   }
 
   if (
@@ -53,13 +39,13 @@ export const getPresetTitle = (preset: TPreset, mention?: boolean) => {
     }${
       tools
         ? ` | ${tools
-          .map((tool: TPlugin | string) => {
-            if (typeof tool === 'string') {
-              return tool;
-            }
-            return tool.pluginKey;
-          })
-          .join(', ')}`
+            .map((tool: TPlugin | string) => {
+              if (typeof tool === 'string') {
+                return tool;
+              }
+              return tool.pluginKey;
+            })
+            .join(', ')}`
         : ''
     }`;
   }

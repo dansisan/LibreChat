@@ -1,28 +1,32 @@
-const { Tools, Constants } = require('librechat-data-provider');
+const { logger } = require('@librechat/data-schemas');
 const { SerpAPI } = require('@langchain/community/tools/serpapi');
 const { Calculator } = require('@langchain/community/tools/calculator');
-const { createCodeExecutionTool, EnvVar } = require('@librechat/agents');
-const { getUserPluginAuthValue } = require('~/server/services/PluginService');
+const { mcpToolPattern, loadWebSearchAuth } = require('@librechat/api');
+const { EnvVar, createCodeExecutionTool, createSearchTool } = require('@librechat/agents');
+const { Tools, EToolResources, replaceSpecialVars } = require('librechat-data-provider');
 const {
   availableTools,
+  manifestToolMap,
   // Basic Tools
   GoogleSearchAPI,
   // Structured Tools
   DALLE3,
+  FluxAPI,
+  OpenWeather,
   StructuredSD,
   StructuredACS,
   TraversaalSearch,
   StructuredWolfram,
+  createYouTubeTools,
   TavilySearchResults,
-  OpenWeather,
+  createOpenAIImageTools,
 } = require('../');
 const { primeFiles: primeCodeFiles } = require('~/server/services/Files/Code/process');
 const { createFileSearchTool, primeFiles: primeSearchFiles } = require('./fileSearch');
+const { getUserPluginAuthValue } = require('~/server/services/PluginService');
+const { loadAuthValues } = require('~/server/services/Tools/credentials');
+const { getCachedTools } = require('~/server/services/Config');
 const { createMCPTool } = require('~/server/services/MCP');
-const { loadSpecs } = require('./loadSpecs');
-const { logger } = require('~/config');
-
-const mcpToolPattern = new RegExp(`^.+${Constants.mcp_delimiter}.+$`);
 
 /**
  * Validates the availability and authentication of tools for a user based on environment variables or user-specific plugin authentication values.
@@ -83,47 +87,8 @@ const validateTools = async (user, tools = []) => {
     return Array.from(validToolsSet.values());
   } catch (err) {
     logger.error('[validateTools] There was a problem validating tools', err);
-    throw new Error('There was a problem validating tools');
+    throw new Error(err);
   }
-};
-
-const loadAuthValues = async ({ userId, authFields, throwError = true }) => {
-  let authValues = {};
-
-  /**
-   * Finds the first non-empty value for the given authentication field, supporting alternate fields.
-   * @param {string[]} fields Array of strings representing the authentication fields. Supports alternate fields delimited by "||".
-   * @returns {Promise<{ authField: string, authValue: string} | null>} An object containing the authentication field and value, or null if not found.
-   */
-  const findAuthValue = async (fields) => {
-    for (const field of fields) {
-      let value = process.env[field];
-      if (value) {
-        return { authField: field, authValue: value };
-      }
-      try {
-        value = await getUserPluginAuthValue(userId, field, throwError);
-      } catch (err) {
-        if (field === fields[fields.length - 1] && !value) {
-          throw err;
-        }
-      }
-      if (value) {
-        return { authField: field, authValue: value };
-      }
-    }
-    return null;
-  };
-
-  for (let authField of authFields) {
-    const fields = authField.split('||');
-    const result = await findAuthValue(fields);
-    if (result) {
-      authValues[result.authField] = result.authValue;
-    }
-  }
-
-  return authValues;
 };
 
 /** @typedef {typeof import('@langchain/core/tools').Tool} ToolConstructor */
@@ -147,10 +112,18 @@ const loadToolWithAuth = (userId, authFields, ToolConstructor, options = {}) => 
 };
 
 /**
+ * @param {string} toolKey
+ * @returns {Array<string>}
+ */
+const getAuthFields = (toolKey) => {
+  return manifestToolMap[toolKey]?.authConfig.map((auth) => auth.authField) ?? [];
+};
+
+/**
  *
  * @param {object} object
  * @param {string} object.user
- * @param {Agent} [object.agent]
+ * @param {Pick<Agent, 'id' | 'provider' | 'model'>} [object.agent]
  * @param {string} [object.model]
  * @param {EModelEndpoint} [object.endpoint]
  * @param {LoadToolOptions} [object.options]
@@ -165,33 +138,69 @@ const loadTools = async ({
   agent,
   model,
   endpoint,
-  useSpecs,
   tools = [],
   options = {},
   functions = true,
   returnMap = false,
 }) => {
   const toolConstructors = {
+    flux: FluxAPI,
     calculator: Calculator,
     google: GoogleSearchAPI,
+    open_weather: OpenWeather,
     wolfram: StructuredWolfram,
     'stable-diffusion': StructuredSD,
     'azure-ai-search': StructuredACS,
     traversaal_search: TraversaalSearch,
     tavily_search_results_json: TavilySearchResults,
-    open_weather: OpenWeather,
   };
 
   const customConstructors = {
-    serpapi: async () => {
-      let apiKey = process.env.SERPAPI_API_KEY;
+    serpapi: async (_toolContextMap) => {
+      const authFields = getAuthFields('serpapi');
+      let envVar = authFields[0] ?? '';
+      let apiKey = process.env[envVar];
       if (!apiKey) {
-        apiKey = await getUserPluginAuthValue(user, 'SERPAPI_API_KEY');
+        apiKey = await getUserPluginAuthValue(user, envVar);
       }
       return new SerpAPI(apiKey, {
         location: 'Austin,Texas,United States',
         hl: 'en',
         gl: 'us',
+      });
+    },
+    youtube: async (_toolContextMap) => {
+      const authFields = getAuthFields('youtube');
+      const authValues = await loadAuthValues({ userId: user, authFields });
+      return createYouTubeTools(authValues);
+    },
+    image_gen_oai: async (toolContextMap) => {
+      const authFields = getAuthFields('image_gen_oai');
+      const authValues = await loadAuthValues({ userId: user, authFields });
+      const imageFiles = options.tool_resources?.[EToolResources.image_edit]?.files ?? [];
+      let toolContext = '';
+      for (let i = 0; i < imageFiles.length; i++) {
+        const file = imageFiles[i];
+        if (!file) {
+          continue;
+        }
+        if (i === 0) {
+          toolContext =
+            'Image files provided in this request (their image IDs listed in order of appearance) available for image editing:';
+        }
+        toolContext += `\n\t- ${file.file_id}`;
+        if (i === imageFiles.length - 1) {
+          toolContext += `\n\nInclude any you need in the \`image_ids\` array when calling \`${EToolResources.image_edit}_oai\`. You may also include previously referenced or generated image IDs.`;
+        }
+      }
+      if (toolContext) {
+        toolContextMap.image_edit_oai = toolContext;
+      }
+      return createOpenAIImageTools({
+        ...authValues,
+        isAgent: !!agent,
+        req: options.req,
+        imageFiles,
       });
     },
   };
@@ -213,24 +222,15 @@ const loadTools = async ({
   };
 
   const toolOptions = {
-    serpapi: { location: 'Austin,Texas,United States', hl: 'en', gl: 'us' },
+    flux: imageGenOptions,
     dalle: imageGenOptions,
     'stable-diffusion': imageGenOptions,
+    serpapi: { location: 'Austin,Texas,United States', hl: 'en', gl: 'us' },
   };
 
-  const toolAuthFields = {};
-
-  availableTools.forEach((tool) => {
-    if (customConstructors[tool.pluginKey]) {
-      return;
-    }
-
-    toolAuthFields[tool.pluginKey] = tool.authConfig.map((auth) => auth.authField);
-  });
-
+  /** @type {Record<string, string>} */
   const toolContextMap = {};
-  const remainingTools = [];
-  const appTools = options.req?.app?.locals?.availableTools ?? {};
+  const appTools = (await getCachedTools({ includeGlobal: true })) ?? {};
 
   for (const tool of tools) {
     if (tool === Tools.execute_code) {
@@ -240,7 +240,13 @@ const loadTools = async ({
           authFields: [EnvVar.CODE_API_KEY],
         });
         const codeApiKey = authValues[EnvVar.CODE_API_KEY];
-        const { files, toolContext } = await primeCodeFiles(options, codeApiKey);
+        const { files, toolContext } = await primeCodeFiles(
+          {
+            ...options,
+            agentId: agent?.id,
+          },
+          codeApiKey,
+        );
         if (toolContext) {
           toolContextMap[tool] = toolContext;
         }
@@ -255,17 +261,48 @@ const loadTools = async ({
       continue;
     } else if (tool === Tools.file_search) {
       requestedTools[tool] = async () => {
-        const { files, toolContext } = await primeSearchFiles(options);
+        const { files, toolContext } = await primeSearchFiles({
+          ...options,
+          agentId: agent?.id,
+        });
         if (toolContext) {
           toolContextMap[tool] = toolContext;
         }
         return createFileSearchTool({ req: options.req, files, entity_id: agent?.id });
       };
       continue;
+    } else if (tool === Tools.web_search) {
+      const webSearchConfig = options?.req?.app?.locals?.webSearch;
+      const result = await loadWebSearchAuth({
+        userId: user,
+        loadAuthValues,
+        webSearchConfig,
+      });
+      const { onSearchResults, onGetHighlights } = options?.[Tools.web_search] ?? {};
+      requestedTools[tool] = async () => {
+        toolContextMap[tool] = `# \`${tool}\`:
+Current Date & Time: ${replaceSpecialVars({ text: '{{iso_datetime}}' })}
+1. **Execute immediately without preface** when using \`${tool}\`.
+2. **After the search, begin with a brief summary** that directly addresses the query without headers or explaining your process.
+3. **Structure your response clearly** using Markdown formatting (Level 2 headers for sections, lists for multiple points, tables for comparisons).
+4. **Cite sources properly** according to the citation anchor format, utilizing group anchors when appropriate.
+5. **Tailor your approach to the query type** (academic, news, coding, etc.) while maintaining an expert, journalistic, unbiased tone.
+6. **Provide comprehensive information** with specific details, examples, and as much relevant context as possible from search results.
+7. **Avoid moralizing language.**
+`.trim();
+        return createSearchTool({
+          ...result.authResult,
+          onSearchResults,
+          onGetHighlights,
+          logger,
+        });
+      };
+      continue;
     } else if (tool && appTools[tool] && mcpToolPattern.test(tool)) {
       requestedTools[tool] = async () =>
         createMCPTool({
           req: options.req,
+          res: options.res,
           toolKey: tool,
           model: agent?.model ?? model,
           provider: agent?.provider ?? endpoint,
@@ -274,7 +311,7 @@ const loadTools = async ({
     }
 
     if (customConstructors[tool]) {
-      requestedTools[tool] = customConstructors[tool];
+      requestedTools[tool] = async () => customConstructors[tool](toolContextMap);
       continue;
     }
 
@@ -282,36 +319,12 @@ const loadTools = async ({
       const options = toolOptions[tool] || {};
       const toolInstance = loadToolWithAuth(
         user,
-        toolAuthFields[tool],
+        getAuthFields(tool),
         toolConstructors[tool],
         options,
       );
       requestedTools[tool] = toolInstance;
       continue;
-    }
-
-    if (functions === true) {
-      remainingTools.push(tool);
-    }
-  }
-
-  let specs = null;
-  if (useSpecs === true && functions === true && remainingTools.length > 0) {
-    specs = await loadSpecs({
-      llm: model,
-      user,
-      message: options.message,
-      memory: options.memory,
-      signal: options.signal,
-      tools: remainingTools,
-      map: true,
-      verbose: false,
-    });
-  }
-
-  for (const tool of remainingTools) {
-    if (specs && specs[tool]) {
-      requestedTools[tool] = specs[tool];
     }
   }
 
@@ -338,7 +351,6 @@ const loadTools = async ({
 
 module.exports = {
   loadToolWithAuth,
-  loadAuthValues,
   validateTools,
   loadTools,
 };

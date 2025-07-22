@@ -1,24 +1,33 @@
-const path = require('path');
-const crypto = require('crypto');
 const {
   Capabilities,
   EModelEndpoint,
   isAgentsEndpoint,
-  AgentCapabilities,
   isAssistantsEndpoint,
   defaultRetrievalModels,
   defaultAssistantsVersion,
+  defaultAgentCapabilities,
 } = require('librechat-data-provider');
+const { sendEvent } = require('@librechat/api');
 const { Providers } = require('@librechat/agents');
-const { getCitations, citeText } = require('./citations');
 const partialRight = require('lodash/partialRight');
-const { sendMessage } = require('./streamResponse');
-const citationRegex = /\[\^\d+?\^]/g;
+
+/** Helper function to escape special characters in regex
+ * @param {string} string - The string to escape.
+ * @returns {string} The escaped string.
+ */
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 const addSpaceIfNeeded = (text) => (text.length > 0 && !text.endsWith(' ') ? text + ' ' : text);
 
 const base = { message: true, initial: true };
-const createOnProgress = ({ generation = '', onProgress: _onProgress }) => {
+const createOnProgress = (
+  { generation = '', onProgress: _onProgress } = {
+    generation: '',
+    onProgress: null,
+  },
+) => {
   let i = 0;
   let tokens = addSpaceIfNeeded(generation);
 
@@ -28,7 +37,7 @@ const createOnProgress = ({ generation = '', onProgress: _onProgress }) => {
     basePayload.text = basePayload.text + chunk;
 
     const payload = Object.assign({}, basePayload, rest);
-    sendMessage(res, payload);
+    sendEvent(res, payload);
     if (_onProgress) {
       _onProgress(payload);
     }
@@ -41,7 +50,7 @@ const createOnProgress = ({ generation = '', onProgress: _onProgress }) => {
   const sendIntermediateMessage = (res, payload, extraTokens = '') => {
     basePayload.text = basePayload.text + extraTokens;
     const message = Object.assign({}, basePayload, payload);
-    sendMessage(res, message);
+    sendEvent(res, message);
     if (i === 0) {
       basePayload.initial = false;
     }
@@ -59,18 +68,9 @@ const createOnProgress = ({ generation = '', onProgress: _onProgress }) => {
   return { onProgress, getPartialText, sendIntermediateMessage };
 };
 
-const handleText = async (response, bing = false) => {
+const handleText = async (response) => {
   let { text } = response;
   response.text = text;
-
-  if (bing) {
-    const links = getCitations(response);
-    if (response.text.match(citationRegex)?.length > 0) {
-      text = citeText(response);
-    }
-    text += links?.length > 0 ? `\n- ${links}` : '';
-  }
-
   return text;
 };
 
@@ -195,12 +195,7 @@ function generateConfig(key, baseURL, endpoint) {
   }
 
   if (agents) {
-    config.capabilities = [
-      AgentCapabilities.execute_code,
-      AgentCapabilities.file_search,
-      AgentCapabilities.actions,
-      AgentCapabilities.tools,
-    ];
+    config.capabilities = defaultAgentCapabilities;
   }
 
   if (assistants && endpoint === EModelEndpoint.azureAssistants) {
@@ -221,47 +216,15 @@ function normalizeEndpointName(name = '') {
   return name.toLowerCase() === Providers.OLLAMA ? Providers.OLLAMA : name;
 }
 
-/**
- * Sanitize a filename by removing any directory components, replacing non-alphanumeric characters
- * @param {string} inputName
- * @returns {string}
- */
-function sanitizeFilename(inputName) {
-  // Remove any directory components
-  let name = path.basename(inputName);
-
-  // Replace any non-alphanumeric characters except for '.' and '-'
-  name = name.replace(/[^a-zA-Z0-9.-]/g, '_');
-
-  // Ensure the name doesn't start with a dot (hidden file in Unix-like systems)
-  if (name.startsWith('.') || name === '') {
-    name = '_' + name;
-  }
-
-  // Limit the length of the filename
-  const MAX_LENGTH = 255;
-  if (name.length > MAX_LENGTH) {
-    const ext = path.extname(name);
-    const nameWithoutExt = path.basename(name, ext);
-    name =
-      nameWithoutExt.slice(0, MAX_LENGTH - ext.length - 7) +
-      '-' +
-      crypto.randomBytes(3).toString('hex') +
-      ext;
-  }
-
-  return name;
-}
-
 module.exports = {
   isEnabled,
   handleText,
   formatSteps,
+  escapeRegExp,
   formatAction,
   isUserProvided,
   generateConfig,
   addSpaceIfNeeded,
   createOnProgress,
-  sanitizeFilename,
   normalizeEndpointName,
 };

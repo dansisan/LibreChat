@@ -5,7 +5,7 @@ import { LocalStorageKeys } from 'librechat-data-provider';
 import { useAvailablePluginsQuery } from 'librechat-data-provider/react-query';
 import type { TStartupConfig, TPlugin, TUser } from 'librechat-data-provider';
 import { mapPlugins, selectPlugins, processPlugins } from '~/utils';
-import useConfigOverride from './useConfigOverride';
+import useSpeechSettingsInit from './useSpeechSettingsInit';
 import store from '~/store';
 
 const pluginStore: TPlugin = {
@@ -25,13 +25,14 @@ export default function useAppStartup({
   startupConfig?: TStartupConfig;
   user?: TUser;
 }) {
-  useConfigOverride();
   const setAvailableTools = useSetRecoilState(store.availableTools);
   const [defaultPreset, setDefaultPreset] = useRecoilState(store.defaultPreset);
   const { data: allPlugins } = useAvailablePluginsQuery({
     enabled: !!user?.plugins,
     select: selectPlugins,
   });
+
+  useSpeechSettingsInit(!!user);
 
   /** Set the app title */
   useEffect(() => {
@@ -78,7 +79,6 @@ export default function useAppStartup({
       return;
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     const userPlugins = user.plugins ?? [];
 
     if (userPlugins.length === 0) {

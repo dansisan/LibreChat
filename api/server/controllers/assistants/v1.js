@@ -1,4 +1,5 @@
 const fs = require('fs').promises;
+const { logger } = require('@librechat/data-schemas');
 const { FileContext } = require('librechat-data-provider');
 const { uploadImageBuffer, filterFile } = require('~/server/services/Files/process');
 const validateAuthor = require('~/server/middleware/assistants/validateAuthor');
@@ -6,8 +7,9 @@ const { getStrategyFunctions } = require('~/server/services/Files/strategies');
 const { deleteAssistantActions } = require('~/server/services/ActionService');
 const { updateAssistantDoc, getAssistants } = require('~/models/Assistant');
 const { getOpenAIClient, fetchAssistants } = require('./helpers');
+const { getCachedTools } = require('~/server/services/Config');
+const { manifestToolMap } = require('~/app/clients/tools');
 const { deleteFileByFilter } = require('~/models/File');
-const { logger } = require('~/config');
 
 /**
  * Create an assistant.
@@ -29,15 +31,26 @@ const createAssistant = async (req, res) => {
     delete assistantData.conversation_starters;
     delete assistantData.append_current_datetime;
 
+    const toolDefinitions = await getCachedTools({ includeGlobal: true });
+
     assistantData.tools = tools
       .map((tool) => {
         if (typeof tool !== 'string') {
           return tool;
         }
 
-        return req.app.locals.availableTools[tool];
+        const toolDef = toolDefinitions[tool];
+        if (!toolDef && manifestToolMap[tool] && manifestToolMap[tool].toolkit === true) {
+          return Object.entries(toolDefinitions)
+            .filter(([key]) => key.startsWith(`${tool}_`))
+
+            .map(([_, val]) => val);
+        }
+
+        return toolDef;
       })
-      .filter((tool) => tool);
+      .filter((tool) => tool)
+      .flat();
 
     let azureModelIdentifier = null;
     if (openai.locals?.azureOptions) {
@@ -122,15 +135,27 @@ const patchAssistant = async (req, res) => {
       append_current_datetime,
       ...updateData
     } = req.body;
+
+    const toolDefinitions = await getCachedTools({ includeGlobal: true });
+
     updateData.tools = (updateData.tools ?? [])
       .map((tool) => {
         if (typeof tool !== 'string') {
           return tool;
         }
 
-        return req.app.locals.availableTools[tool];
+        const toolDef = toolDefinitions[tool];
+        if (!toolDef && manifestToolMap[tool] && manifestToolMap[tool].toolkit === true) {
+          return Object.entries(toolDefinitions)
+            .filter(([key]) => key.startsWith(`${tool}_`))
+
+            .map(([_, val]) => val);
+        }
+
+        return toolDef;
       })
-      .filter((tool) => tool);
+      .filter((tool) => tool)
+      .flat();
 
     if (openai.locals?.azureOptions && updateData.model) {
       updateData.model = openai.locals.azureOptions.azureOpenAIApiDeploymentName;

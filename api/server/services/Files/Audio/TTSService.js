@@ -1,8 +1,8 @@
 const axios = require('axios');
+const { genAzureEndpoint } = require('@librechat/api');
 const { extractEnvVariable, TTSProviders } = require('librechat-data-provider');
 const { getRandomVoiceId, createChunkProcessor, splitTextIntoChunks } = require('./streamAudio');
 const { getCustomConfig } = require('~/server/services/Config');
-const { genAzureEndpoint } = require('~/utils');
 const { logger } = require('~/config');
 
 /**
@@ -364,7 +364,7 @@ class TTSService {
       shouldContinue = false;
     });
 
-    const processChunks = createChunkProcessor(req.body.messageId);
+    const processChunks = createChunkProcessor(req.user.id, req.body.messageId);
 
     try {
       while (shouldContinue) {

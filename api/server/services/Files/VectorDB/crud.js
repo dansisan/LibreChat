@@ -1,9 +1,10 @@
 const fs = require('fs');
 const axios = require('axios');
 const FormData = require('form-data');
+const { logAxiosError } = require('@librechat/api');
+const { logger } = require('@librechat/data-schemas');
 const { FileSources } = require('librechat-data-provider');
-const { logAxiosError } = require('~/utils');
-const { logger } = require('~/config');
+const { generateShortLivedToken } = require('~/server/services/AuthService');
 
 /**
  * Deletes a file from the vector database. This function takes a file object, constructs the full path, and
@@ -23,7 +24,8 @@ const deleteVectors = async (req, file) => {
     return;
   }
   try {
-    const jwtToken = req.headers.authorization.split(' ')[1];
+    const jwtToken = generateShortLivedToken(req.user.id);
+
     return await axios.delete(`${process.env.RAG_API_URL}/documents`, {
       headers: {
         Authorization: `Bearer ${jwtToken}`,
@@ -37,7 +39,14 @@ const deleteVectors = async (req, file) => {
       error,
       message: 'Error deleting vectors',
     });
-    throw new Error(error.message || 'An error occurred during file deletion.');
+    if (
+      error.response &&
+      error.response.status !== 404 &&
+      (error.response.status < 200 || error.response.status >= 300)
+    ) {
+      logger.warn('Error deleting vectors, file will not be deleted');
+      throw new Error(error.message || 'An error occurred during file deletion.');
+    }
   }
 };
 
@@ -63,7 +72,7 @@ async function uploadVectors({ req, file, file_id, entity_id }) {
   }
 
   try {
-    const jwtToken = req.headers.authorization.split(' ')[1];
+    const jwtToken = generateShortLivedToken(req.user.id);
     const formData = new FormData();
     formData.append('file_id', file_id);
     formData.append('file', fs.createReadStream(file.path));

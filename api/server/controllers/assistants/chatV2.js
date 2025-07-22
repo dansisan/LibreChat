@@ -1,4 +1,7 @@
 const { v4 } = require('uuid');
+const { sleep } = require('@librechat/agents');
+const { sendEvent } = require('@librechat/api');
+const { logger } = require('@librechat/data-schemas');
 const {
   Time,
   Constants,
@@ -18,19 +21,18 @@ const {
   saveAssistantMessage,
 } = require('~/server/services/Threads');
 const { runAssistant, createOnTextProgress } = require('~/server/services/AssistantService');
-const { sendMessage, sleep, isEnabled, countTokens } = require('~/server/utils');
 const { createErrorHandler } = require('~/server/controllers/assistants/errors');
 const validateAuthor = require('~/server/middleware/assistants/validateAuthor');
 const { createRun, StreamRunManager } = require('~/server/services/Runs');
 const { addTitle } = require('~/server/services/Endpoints/assistants');
 const { createRunBody } = require('~/server/services/createRunBody');
 const { getTransactions } = require('~/models/Transaction');
-const checkBalance = require('~/models/checkBalance');
+const { checkBalance } = require('~/models/balanceMethods');
 const { getConvo } = require('~/models/Conversation');
 const getLogStores = require('~/cache/getLogStores');
+const { countTokens } = require('~/server/utils');
 const { getModelMaxTokens } = require('~/utils');
 const { getOpenAIClient } = require('./helpers');
-const { logger } = require('~/config');
 
 /**
  * @route POST /
@@ -124,7 +126,8 @@ const chatV2 = async (req, res) => {
     }
 
     const checkBalanceBeforeRun = async () => {
-      if (!isEnabled(process.env.CHECK_BALANCE)) {
+      const balance = req.app?.locals?.balance;
+      if (!balance?.enabled) {
         return;
       }
       const transactions =
@@ -308,7 +311,7 @@ const chatV2 = async (req, res) => {
     await Promise.all(promises);
 
     const sendInitialResponse = () => {
-      sendMessage(res, {
+      sendEvent(res, {
         sync: true,
         conversationId,
         // messages: previousMessages,
@@ -397,18 +400,6 @@ const chatV2 = async (req, res) => {
 
       response = streamRunManager;
       response.text = streamRunManager.intermediateText;
-
-      if (response.text) {
-        const messageCache = getLogStores(CacheKeys.MESSAGES);
-        messageCache.set(
-          responseMessageId,
-          {
-            complete: true,
-            text: response.text,
-          },
-          Time.FIVE_MINUTES,
-        );
-      }
     };
 
     await processRun();
@@ -439,9 +430,11 @@ const chatV2 = async (req, res) => {
       thread_id,
       model: assistant_id,
       endpoint,
+      spec: endpointOption.spec,
+      iconURL: endpointOption.iconURL,
     };
 
-    sendMessage(res, {
+    sendEvent(res, {
       final: true,
       conversation,
       requestMessage: {

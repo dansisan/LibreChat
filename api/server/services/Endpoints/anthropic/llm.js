@@ -1,5 +1,6 @@
-const { HttpsProxyAgent } = require('https-proxy-agent');
+const { ProxyAgent } = require('undici');
 const { anthropicSettings, removeNullishValues } = require('librechat-data-provider');
+const { checkPromptCacheSupport, getClaudeHeaders, configureReasoning } = require('./helpers');
 
 /**
  * Generates configuration options for creating an Anthropic language model (LLM) instance.
@@ -20,6 +21,14 @@ const { anthropicSettings, removeNullishValues } = require('librechat-data-provi
  * @returns {Object} Configuration options for creating an Anthropic LLM instance, with null and undefined values removed.
  */
 function getLLMConfig(apiKey, options = {}) {
+  const systemOptions = {
+    thinking: options.modelOptions.thinking ?? anthropicSettings.thinking.default,
+    promptCache: options.modelOptions.promptCache ?? anthropicSettings.promptCache.default,
+    thinkingBudget: options.modelOptions.thinkingBudget ?? anthropicSettings.thinkingBudget.default,
+  };
+  for (let key in systemOptions) {
+    delete options.modelOptions[key];
+  }
   const defaultOptions = {
     model: anthropicSettings.model.default,
     maxOutputTokens: anthropicSettings.maxOutputTokens.default,
@@ -29,28 +38,57 @@ function getLLMConfig(apiKey, options = {}) {
   const mergedOptions = Object.assign(defaultOptions, options.modelOptions);
 
   /** @type {AnthropicClientOptions} */
-  const requestOptions = {
+  let requestOptions = {
     apiKey,
     model: mergedOptions.model,
     stream: mergedOptions.stream,
     temperature: mergedOptions.temperature,
-    topP: mergedOptions.topP,
-    topK: mergedOptions.topK,
     stopSequences: mergedOptions.stop,
     maxTokens:
       mergedOptions.maxOutputTokens || anthropicSettings.maxOutputTokens.reset(mergedOptions.model),
     clientOptions: {},
   };
 
+  requestOptions = configureReasoning(requestOptions, systemOptions);
+
+  if (!/claude-3[-.]7/.test(mergedOptions.model)) {
+    requestOptions.topP = mergedOptions.topP;
+    requestOptions.topK = mergedOptions.topK;
+  } else if (requestOptions.thinking == null) {
+    requestOptions.topP = mergedOptions.topP;
+    requestOptions.topK = mergedOptions.topK;
+  }
+
+  const supportsCacheControl =
+    systemOptions.promptCache === true && checkPromptCacheSupport(requestOptions.model);
+  const headers = getClaudeHeaders(requestOptions.model, supportsCacheControl);
+  if (headers) {
+    requestOptions.clientOptions.defaultHeaders = headers;
+  }
+
   if (options.proxy) {
-    requestOptions.clientOptions.httpAgent = new HttpsProxyAgent(options.proxy);
+    const proxyAgent = new ProxyAgent(options.proxy);
+    requestOptions.clientOptions.fetchOptions = {
+      dispatcher: proxyAgent,
+    };
   }
 
   if (options.reverseProxyUrl) {
     requestOptions.clientOptions.baseURL = options.reverseProxyUrl;
+    requestOptions.anthropicApiUrl = options.reverseProxyUrl;
+  }
+
+  const tools = [];
+
+  if (mergedOptions.web_search) {
+    tools.push({
+      type: 'web_search_20250305',
+      name: 'web_search',
+    });
   }
 
   return {
+    tools,
     /** @type {AnthropicClientOptions} */
     llmConfig: removeNullishValues(requestOptions),
   };
